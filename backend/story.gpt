@@ -1,0 +1,125 @@
+tools:
+  - sys.read
+  - sys.write
+  - sys.download
+  - sys.find
+  - github.com/gptscript-ai/browser
+  - github.com/gptscript-ai/image-generation
+  - github.com/nw0rn/text2speech-gptscript
+  - github.com/dejwid/speech2text-gptscript
+
+providers:
+  openai:
+    apiKey: ${OPENAI_API_KEY}
+
+args:
+  url: Link to the article or page
+  dir: Directory to save the created files to
+
+steps:
+  # 1. Browse to ${url} and read the page contents.
+  - id: browsePage
+    use: github.com/gptscript-ai/browser
+    with:
+      url: ${url}
+
+  # 2. Create a tldr text version of it for an instagram reel or a tiktok video.
+  - id: tldr
+    prompt: |
+      You are creating a short script for a social video (Instagram Reels / TikTok).
+      Based on the following page content, write a TL;DR script.
+      Rules:
+      - max 100 words
+      - no emojis
+      - spoken style
+      Page content:
+      {{steps.browsePage.output}}
+
+  # 3. Split the created text into 3 parts, save the texts to "${dir}/story-${INDEX}.txt"
+  - id: split
+    prompt: |
+      Split the following text into exactly 3 parts of similar length.
+      Return ONLY a JSON array of 3 strings.
+      Text:
+      {{steps.tldr.output}}
+
+  # write story-1.txt
+  - id: writeStory1
+    use: sys.write
+    with:
+      path: ${dir}/story-1.txt
+      contents: "{{ json.parse(steps.split.output)[0] }}"
+
+  # write story-2.txt
+  - id: writeStory2
+    use: sys.write
+    with:
+      path: ${dir}/story-2.txt
+      contents: "{{ json.parse(steps.split.output)[1] }}"
+
+  # write story-3.txt
+  - id: writeStory3
+    use: sys.write
+    with:
+      path: ${dir}/story-3.txt
+      contents: "{{ json.parse(steps.split.output)[2] }}"
+
+  # 4. For each text part, come up with a keyword or a phrase for a 1024x1792 b-roll image, generate and save
+  - id: image1
+    use: github.com/gptscript-ai/image-generation
+    with:
+      prompt: "b-roll background image for: {{ json.parse(steps.split.output)[0] }}"
+      output_path: ${dir}/b-roll-1.png
+      size: "1024x1792"
+
+  - id: image2
+    use: github.com/gptscript-ai/image-generation
+    with:
+      prompt: "b-roll background image for: {{ json.parse(steps.split.output)[1] }}"
+      output_path: ${dir}/b-roll-2.png
+      size: "1024x1792"
+
+  - id: image3
+    use: github.com/gptscript-ai/image-generation
+    with:
+      prompt: "b-roll background image for: {{ json.parse(steps.split.output)[2] }}"
+      output_path: ${dir}/b-roll-3.png
+      size: "1024x1792"
+
+  # 5. For each text part, generate speech files and save them to: "${dir}/voiceover-${INDEX}"
+  - id: tts1
+    use: github.com/nw0rn/text2speech-gptscript
+    with:
+      text: "{{ json.parse(steps.split.output)[0] }}"
+      output: ${dir}/voiceover-1.mp3
+
+  - id: tts2
+    use: github.com/nw0rn/text2speech-gptscript
+    with:
+      text: "{{ json.parse(steps.split.output)[1] }}"
+      output: ${dir}/voiceover-2.mp3
+
+  - id: tts3
+    use: github.com/nw0rn/text2speech-gptscript
+    with:
+      text: "{{ json.parse(steps.split.output)[2] }}"
+      output: ${dir}/voiceover-3.mp3
+
+  # 6. Run speech2text for all 3 *.mp3 files inside ${dir}
+  - id: stt1
+    use: github.com/dejwid/speech2text-gptscript
+    with:
+      file: ${dir}/voiceover-1.mp3
+      output: ${dir}/voiceover-1.txt
+
+  - id: stt2
+    use: github.com/dejwid/speech2text-gptscript
+    with:
+      file: ${dir}/voiceover-2.mp3
+      output: ${dir}/voiceover-2.txt
+
+  - id: stt3
+    use: github.com/dejwid/speech2text-gptscript
+    with:
+      file: ${dir}/voiceover-3.mp3
+      output: ${dir}/voiceover-3.txt
