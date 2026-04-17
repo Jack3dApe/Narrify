@@ -3,202 +3,245 @@ import 'dotenv/config';
 import uniqid from 'uniqid';
 import fs from 'fs';
 import cors from 'cors';
-import { GPTScript, RunEventType } from "@gptscript-ai/gptscript";
+import { spawn } from 'node:child_process';
 import ffmpeg from 'fluent-ffmpeg';
-import ffmpegPath from "ffmpeg-static";
-import * as path from 'node:path';       
+import ffmpegPath from 'ffmpeg-static';
+import * as path from 'node:path';
+import { get as httpGet } from 'node:http';
+import { get as httpsGet } from 'node:https';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const GPTSCRIPT_BIN = path.join(__dirname, 'node_modules/.bin/gptscript');
+const STORY_GPT = path.join(__dirname, 'story.gpt');
+
+// ─── fetch + strip HTML ───────────────────────────────────────────────────────
+
+async function fetchArticleText(url) {
+  return new Promise((resolve, reject) => {
+    const get = url.startsWith('https') ? httpsGet : httpGet;
+    get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return fetchArticleText(res.headers.location).then(resolve).catch(reject);
+      }
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        const text = data
+          .replace(/<script[\s\S]*?<\/script>/gi, '')
+          .replace(/<style[\s\S]*?<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 12000);
+        resolve(text);
+      });
+    }).on('error', reject);
+  });
+}
+
+// ─── run gptscript as child process ──────────────────────────────────────────
+
+function runGptScript(articleFile, storyDir) {
+  return new Promise((resolve, reject) => {
+    console.log('[GPT] Spawning gptscript...');
+    console.log('[GPT] Script:', STORY_GPT);
+    console.log('[GPT] articleFile:', articleFile);
+    console.log('[GPT] storyDir:', storyDir);
+
+    const proc = spawn(GPTSCRIPT_BIN, [
+      '--disable-tui',
+      '--credential-override', `sys.openai:OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`,
+      STORY_GPT,
+      '--articleFile', articleFile,
+      '--dir', storyDir,
+    ], {
+      env: { ...process.env },
+    });
+
+    proc.stdout.on('data', (chunk) => {
+      const lines = chunk.toString().split('\n').filter(l => l.trim());
+      for (const line of lines) {
+        // tag lines by what they mention
+        if (/image.gen|imageGen|dall.e/i.test(line)) {
+          console.log(`[IMAGE] ${line}`);
+        } else if (/text2speech|tts/i.test(line)) {
+          console.log(`[TTS]   ${line}`);
+        } else if (/speech2text|whisper|transcri/i.test(line)) {
+          console.log(`[STT]   ${line}`);
+        } else if (/download/i.test(line)) {
+          console.log(`[DL]    ${line}`);
+        } else if (/write/i.test(line)) {
+          console.log(`[WRITE] ${line}`);
+        } else if (/error|Error/i.test(line)) {
+          console.log(`[ERR]   ${line}`);
+        } else {
+          console.log(`[GPT]   ${line}`);
+        }
+      }
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      const lines = chunk.toString().split('\n').filter(l => l.trim());
+      for (const line of lines) {
+        console.log(`[GPT-STDERR] ${line}`);
+      }
+    });
+
+    proc.on('error', (err) => {
+      console.error('[GPT] Failed to spawn process:', err.message);
+      reject(err);
+    });
+
+    proc.on('close', (code) => {
+      console.log(`[GPT] Process exited with code ${code}`);
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`gptscript exited with code ${code}`));
+      }
+    });
+  });
+}
+
+// ─── express app ─────────────────────────────────────────────────────────────
 
 const app = express();
 app.use(cors());
 app.use(express.static('stories'));
-
 ffmpeg.setFfmpegPath(ffmpegPath);
-const g = new GPTScript();
 
-console.log("Server starting...");
+app.get('/test', (_req, res) => res.json('test ok'));
 
-app.get('/test', (req, res) => {
-  return res.json('test ok');
-});
+// ─── create story ─────────────────────────────────────────────────────────────
 
 app.get('/create-story', async (req, res) => {
- const url = decodeURIComponent(req.query.url);
+  const url = decodeURIComponent(req.query.url);
   const dir = uniqid();
-  const storyDir = path.join(process.cwd(), 'stories', dir); 
+  const storyDir = path.join(__dirname, 'stories', dir);
   fs.mkdirSync(storyDir, { recursive: true });
 
-  console.log("Story parameters:", { url, dir, storyDir });
-
-  // usamos o próprio url original, mas envolvido em aspas triplas no input
-  const opts = {
-    input: `--url """${url}""" --dir """${storyDir}"""`,
-    disableCache: true,
-  };
+  console.log('\n=== CREATE STORY ===');
+  console.log('URL:', url);
+  console.log('Dir:', storyDir);
 
   try {
-    console.log("1. Starting GPTScript run");
-    console.log("API key prefix:", process.env.OPENAI_API_KEY?.slice(0, 7) + "...");
-    console.log("Options received:", opts);
+    // 1. fetch article
+    console.log('[FETCH] Fetching article text...');
+    const articleText = await fetchArticleText(url);
+    const articleFile = path.join(storyDir, 'article.txt');
+    fs.writeFileSync(articleFile, articleText, 'utf8');
+    console.log(`[FETCH] Done — ${articleText.length} chars saved to ${articleFile}`);
 
-    const run = await g.run(path.join(process.cwd(), 'story.gpt'), {
-      ...opts,
-      env: [
-        `OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`,
-        `GPTSCRIPT_DEBUG=true`,
-      ],
-    });
+    // 2. run gptscript pipeline
+    await runGptScript(articleFile, storyDir);
 
-    console.log("2. GPTScript run object created");
-
-    run.on(RunEventType.Event, ev => {
-  // tipo do evento
-  console.log("Event:", ev.type);
-
-    if (ev.tool) {
-      console.log("  tool:", ev.tool);
+    // 3. verify assets exist
+    const expected = [
+      'b-roll-1.png', 'b-roll-2.png', 'b-roll-3.png',
+      'voiceover-1.mp3', 'voiceover-2.mp3', 'voiceover-3.mp3',
+      'voiceover-1.txt', 'voiceover-2.txt', 'voiceover-3.txt',
+    ];
+    const missing = expected.filter(f => !fs.existsSync(path.join(storyDir, f)));
+    if (missing.length > 0) {
+      console.error('[ASSETS] Missing files:', missing);
+      return res.json('error');
     }
-    if (ev.name) {
-      console.log("  name:", ev.name);
-    }
-    if (ev.callId) {
-      console.log("  callId:", ev.callId);
-    }
-
-    if (ev.error) {
-      console.log("  ERROR from event:", ev.error);
-    }
-
-    if (ev.type === RunEventType.CallFinish && ev.output) {
-      console.log("  OUTPUT:", ev.output);
-    }
-    });
-
-    console.log("3. Awaiting run.text()");
-    const result = await run.text();
-    console.log("4. GPTScript finished, result received:", result);
-
+    console.log('[ASSETS] All assets present');
     return res.json(dir);
+
   } catch (e) {
-    console.log("Error during story creation:", e);
+    console.error('[ERROR] create-story failed:', e.message);
     return res.json('error');
   }
 });
 
+// ─── build video ──────────────────────────────────────────────────────────────
+
 app.get('/build-video', async (req, res) => {
-  console.log("GET /build-video called");
   const id = req.query.id;
-  if (!id || id === 'error') {
-    console.log("Invalid or missing ID");
-    return res.status(400).json('error. missing or invalid id');
-  }
+  console.log('\n=== BUILD VIDEO ===', id);
 
-  const dir = './stories/' + id;
-  if (!fs.existsSync(dir)) {
-    console.log("Directory not found:", dir);
-    return res.status(404).json('story not found');
-  }
+  if (!id || id === 'error') return res.status(400).json('error: missing id');
 
-  const hasAssets =
-    fs.existsSync(dir + '/b-roll-1.png') &&
-    fs.existsSync(dir + '/b-roll-2.png') &&
-    fs.existsSync(dir + '/b-roll-3.png') &&
-    fs.existsSync(dir + '/voiceover-1.mp3') &&
-    fs.existsSync(dir + '/voiceover-2.mp3') &&
-    fs.existsSync(dir + '/voiceover-3.mp3');
+  const dir = path.join(__dirname, 'stories', id);
+  if (!fs.existsSync(dir)) return res.status(404).json('error: story not found');
 
-  if (!hasAssets) {
-    console.log("Assets not generated for", dir);
-    return res.status(400).json('assets not generated');
-  }
-  console.log("Directory found:", dir);
+  try {
+    // rename assets to numbered convention
+    if (!fs.existsSync(path.join(dir, '1.png'))) {
+      for (let i = 1; i <= 3; i++) {
+        fs.renameSync(path.join(dir, `b-roll-${i}.png`),    path.join(dir, `${i}.png`));
+        fs.renameSync(path.join(dir, `voiceover-${i}.mp3`), path.join(dir, `${i}.mp3`));
+        fs.renameSync(path.join(dir, `voiceover-${i}.txt`), path.join(dir, `transcription-${i}.json`));
+      }
+      console.log('[VIDEO] Assets renamed');
+    }
 
-  if (!fs.existsSync(path.join(dir, '1.png'))) {
-    fs.renameSync(path.join(dir, 'b-roll-1.png'), path.join(dir, '1.png'));
-    fs.renameSync(path.join(dir, 'b-roll-2.png'), path.join(dir, '2.png'));
-    fs.renameSync(path.join(dir, 'b-roll-3.png'), path.join(dir, '3.png'));
-    fs.renameSync(path.join(dir, 'voiceover-1.mp3'), path.join(dir, '1.mp3'));
-    fs.renameSync(path.join(dir, 'voiceover-2.mp3'), path.join(dir, '2.mp3'));
-    fs.renameSync(path.join(dir, 'voiceover-3.mp3'), path.join(dir, '3.mp3'));
-    fs.renameSync(path.join(dir, 'voiceover-1.txt'), path.join(dir, 'transcription-1.json'));
-    fs.renameSync(path.join(dir, 'voiceover-2.txt'), path.join(dir, 'transcription-2.json'));
-    fs.renameSync(path.join(dir, 'voiceover-3.txt'), path.join(dir, 'transcription-3.json'));
-    console.log("File rename complete");
-  }
+    // build one video segment per image+audio pair
+    for (let i = 0; i < 3; i++) {
+      const imgPath   = path.join(dir, `${i + 1}.png`);
+      const audioPath = path.join(dir, `${i + 1}.mp3`);
+      const jsonPath  = path.join(dir, `transcription-${i + 1}.json`);
+      const outPath   = path.join(dir, `output_${i}.mp4`);
 
-  const images = ['1.png', '2.png', '3.png'];
-  const audio = ['1.mp3', '2.mp3', '3.mp3'];
-  const transcriptions = [
-    'transcription-1.json',
-    'transcription-2.json',
-    'transcription-3.json'
-  ];
+      console.log(`[VIDEO] Building segment ${i + 1}...`);
 
-  console.log("Building individual videos...");
+      const transcription = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+      const words    = transcription.words || [];
+      const duration = parseFloat(transcription.duration).toFixed(2);
 
-  for (let i = 0; i < images.length; i++) {
-    const inputImage = path.join(dir, images[i]);
-    const inputAudio = path.join(dir, audio[i]);
-    const inputTranscription = path.join(dir, transcriptions[i]);
-    const outputVideo = path.join(dir, `output_${i}.mp4`);
+      let drawtextFilter = words.map(w => {
+        const word  = w.word.replace(/'/g, "\\'").replace(/"/g, '\\"');
+        const start = parseFloat(w.start).toFixed(2);
+        const end   = parseFloat(w.end).toFixed(2);
+        return `drawtext=text='${word}':fontcolor=white:fontsize=96:borderw=4:bordercolor=black:x=(w-text_w)/2:y=(h*3/4)-text_h:enable='between(t\\,${start}\\,${end})'`;
+      }).join(',');
 
-    console.log("Reading transcription:", inputTranscription);
-    const transcription = JSON.parse(fs.readFileSync(inputTranscription, 'utf8'));
-    const words = transcription.words;
-    const duration = parseFloat(transcription.duration).toFixed(2);
+      await new Promise((resolve, reject) => {
+        const cmd = ffmpeg()
+          .input(imgPath).loop(duration)
+          .input(audioPath)
+          .audioCodec('copy')
+          .outputOptions('-t', duration);
+        if (drawtextFilter) cmd.videoFilter(drawtextFilter);
+        cmd
+          .on('start', c => console.log(`[FFMPEG] ${c.slice(0, 80)}...`))
+          .on('error', reject)
+          .on('end', () => { console.log(`[VIDEO] Segment ${i + 1} done`); resolve(); })
+          .save(outPath);
+      });
+    }
 
-    console.log("Generating drawtext filter...");
-    let drawtextFilter = '';
-    words.forEach(wordInfo => {
-      const word = wordInfo.word.replace(/'/g, "\\'").replace(/"/g, '\\"');
-      const start = parseFloat(wordInfo.start).toFixed(2);
-      const end = parseFloat(wordInfo.end).toFixed(2);
-      drawtextFilter += `drawtext=text='${word}':fontcolor=white:fontsize=96:borderw=4:bordercolor=black:x=(w-text_w)/2:y=(h*3/4)-text_h:enable='between(t\\,${start}\\,${end})',`;
-    });
-    drawtextFilter = drawtextFilter.slice(0, -1);
-
-    console.log(`Processing: ${inputImage} and ${inputAudio}`);
-    console.log(`Running ffmpeg for segment ${i + 1}`);
-
+    // merge segments
+    console.log('[VIDEO] Merging segments...');
     await new Promise((resolve, reject) => {
       ffmpeg()
-        .input(inputImage)
-        .loop(duration)
-        .input(inputAudio)
-        .audioCodec('copy')
-        .videoFilter(drawtextFilter)
-        .outputOptions('-t', duration)
-        .on('error', e => {
-          console.error(e);
-          reject(e);
-        })
-        .on('end', resolve)
-        .save(outputVideo);
+        .input(path.join(dir, 'output_0.mp4'))
+        .input(path.join(dir, 'output_1.mp4'))
+        .input(path.join(dir, 'output_2.mp4'))
+        .on('error', reject)
+        .on('end', () => { console.log('[VIDEO] Merge complete'); resolve(); })
+        .mergeToFile(path.join(dir, 'final.mp4'));
     });
 
-    console.log(`Video segment complete: ${outputVideo}`);
+    return res.json(`${id}/final.mp4`);
+
+  } catch (e) {
+    console.error('[ERROR] build-video failed:', e.message);
+    return res.status(500).json('error');
   }
-
-  console.log("Merging all videos...");
-  await new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(path.join(dir, 'output_0.mp4'))
-      .input(path.join(dir, 'output_1.mp4'))
-      .input(path.join(dir, 'output_2.mp4'))
-      .on('end', resolve)
-      .on('error', reject)
-      .mergeToFile(path.join(dir, 'final.mp4'));
-  });
-
-  console.log("All videos merged successfully");
-  return res.json(`${id}/final.mp4`);
 });
 
-app.get('/samples', (req, res) => {
-  console.log("GET /samples called");
-  const stories = fs.readdirSync('./stories').filter(dir => {
-    return dir.match(/^[a-z0-9]{6,}$/) && fs.existsSync(`./stories/${dir}/final.mp4`);
-  });
-  console.log("Samples found:", stories);
+// ─── samples ──────────────────────────────────────────────────────────────────
+
+app.get('/samples', (_req, res) => {
+  const storiesDir = path.join(__dirname, 'stories');
+  if (!fs.existsSync(storiesDir)) return res.json([]);
+  const stories = fs.readdirSync(storiesDir).filter(d =>
+    /^[a-z0-9]{6,}$/.test(d) && fs.existsSync(path.join(storiesDir, d, 'final.mp4'))
+  );
+  console.log('[SAMPLES]', stories);
   res.json(stories);
 });
 

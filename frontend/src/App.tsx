@@ -34,23 +34,43 @@ function App() {
   }
   async function handleSubmit(ev:FormEvent) {
     ev.preventDefault();
-    setLoadingMessage('Generating assets...');
-    const assetsResponse = await axios.get(
-      'http://localhost:8080/create-story?url='+encodeURIComponent(url)
-    );
-    const id = await assetsResponse.data;
-    setLoadingMessage('Preparing your video...');
-    const videoResponse = await axios.get('http://localhost:8080/build-video?id='+id);
-    setLoadingMessage('');
-    window.location.href = 'http://localhost:8080/'+videoResponse.data;
+    try {
+      setLoadingMessage('Generating assets...');
+      const assetsResponse = await axios.get(
+        'http://localhost:8080/create-story?url='+encodeURIComponent(url)
+      );
+      const id = assetsResponse.data;
+      if (!id || id === 'error') {
+        setLoadingMessage('Error generating assets. Check the backend logs.');
+        return;
+      }
+      setLoadingMessage('Preparing your video...');
+      const videoResponse = await axios.get('http://localhost:8080/build-video?id='+id);
+      if (!videoResponse.data || videoResponse.data === 'error') {
+        setLoadingMessage('Error building video. Check the backend logs.');
+        return;
+      }
+      setLoadingMessage('');
+      window.location.href = 'http://localhost:8080/'+videoResponse.data;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setLoadingMessage('Error: ' + msg);
+    }
   }
   return (
     <>
       {loadingMessage && (
-        <div className="fixed inset-0 z-20 bg-black/90 flex justify-center items-center">
-          <p className="text-4xl text-center">
+        <div className="fixed inset-0 z-20 bg-black/90 flex flex-col justify-center items-center gap-4">
+          <p className="text-4xl text-center px-8">
             {loadingMessage}
           </p>
+          {loadingMessage.startsWith('Error') && (
+            <button
+              onClick={() => setLoadingMessage('')}
+              className="mt-4 bg-white text-black px-6 py-2 rounded-full uppercase text-sm">
+              Dismiss
+            </button>
+          )}
         </div>
       )}
       <main className="max-w-2xl mx-auto flex gap-16 px-4">
@@ -79,21 +99,29 @@ function App() {
             </button>
           </form>
         </div>
-        <div className="py-4">
-          <div className="text-gray-500 w-[240px] h-[380px] relative">
-            {samples?.length > 0 && samples.map((sample,samplesKey) => (
+        <div className="py-4 flex items-center">
+          <div className="w-[240px] h-[380px] relative">
+            <img
+              src="/sample.png"
+              alt="Sample"
+              className="w-full h-full object-cover rounded-2xl shadow-lg"
+              style={{
+                transform: 'rotateZ(3deg)',
+                boxShadow: '0 0 40px rgba(56,189,248,0.3)',
+              }}
+            />
+            {samples?.length > 0 && samples.map((sample, samplesKey) => (
               <video
-                playsInline={true}
-                muted={true}
-                controls={false}
-                loop={true}
-                autoPlay={true}
-                className="shadow-4xl shadow-sky-400 rounded-2xl overflow-hidden absolute top-2 transition-all duration-300"
+                key={samplesKey}
+                playsInline muted loop autoPlay
+                className="rounded-2xl overflow-hidden absolute inset-0 w-full h-full object-cover transition-all duration-300"
                 style={{
-                  opacity: samplesKey === activeSampleIndex ? '1': '0',
-                  transform: 'scaleX(1) scaleY(1) scaleZ(1) rotateX(0deg) rotateY(0deg) rotateZ(3deg) translateX(0px) translateY(0px) translateZ(0px) skewX(0deg) skewY(0deg)'
+                  opacity: samplesKey === activeSampleIndex ? '1' : '0',
+                  transform: 'rotateZ(3deg)',
+                  boxShadow: '0 0 40px rgba(56,189,248,0.3)',
                 }}
-                src={'http://localhost:8080/' + sample + '/final.mp4'}></video>
+                src={'http://localhost:8080/' + sample + '/final.mp4'}
+              />
             ))}
           </div>
         </div>

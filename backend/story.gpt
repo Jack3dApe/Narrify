@@ -1,125 +1,58 @@
-tools:
-  - sys.read
-  - sys.write
-  - sys.download
-  - sys.find
-  - github.com/gptscript-ai/browser
-  - github.com/gptscript-ai/image-generation
-  - github.com/nw0rn/text2speech-gptscript
-  - github.com/dejwid/speech2text-gptscript
+tools: write-scripts, generate-images, generate-audio, transcribe-audio
+args: articleFile: Path to the text file with the article content
+args: dir: Directory to save the created files to
 
-providers:
-  openai:
-    apiKey: ${OPENAI_API_KEY}
+Call these tools in this exact order:
+1. write-scripts with articleFile=${articleFile} and dir=${dir}
+2. generate-images with dir=${dir}
+3. generate-audio with dir=${dir}
+4. transcribe-audio with dir=${dir}
 
-args:
-  url: Link to the article or page
-  dir: Directory to save the created files to
+---
+name: write-scripts
+tools: sys.read, sys.write
+args: articleFile: Path to the article text file
+args: dir: Directory to save story files
 
-steps:
-  # 1. Browse to ${url} and read the page contents.
-  - id: browsePage
-    use: github.com/gptscript-ai/browser
-    with:
-      url: ${url}
+Read ${articleFile} using sys.read.
+Based on the content, write a TL;DR script for a social video (max 100 words, no emojis, spoken conversational style).
+Split the script into exactly 3 parts of similar length.
+Write Part 1 to ${dir}/story-1.txt using sys.write.
+Write Part 2 to ${dir}/story-2.txt using sys.write.
+Write Part 3 to ${dir}/story-3.txt using sys.write.
 
-  # 2. Create a tldr text version of it for an instagram reel or a tiktok video.
-  - id: tldr
-    prompt: |
-      You are creating a short script for a social video (Instagram Reels / TikTok).
-      Based on the following page content, write a TL;DR script.
-      Rules:
-      - max 100 words
-      - no emojis
-      - spoken style
-      Page content:
-      {{steps.browsePage.output}}
+---
+name: generate-images
+tools: sys.read, sys.download, github.com/gptscript-ai/image-generation
+args: dir: Directory containing story files
 
-  # 3. Split the created text into 3 parts, save the texts to "${dir}/story-${INDEX}.txt"
-  - id: split
-    prompt: |
-      Split the following text into exactly 3 parts of similar length.
-      Return ONLY a JSON array of 3 strings.
-      Text:
-      {{steps.tldr.output}}
+Read ${dir}/story-1.txt, ${dir}/story-2.txt, and ${dir}/story-3.txt using sys.read.
+For each story part:
+1. Call imageGeneration with the story text as prompt and size 1024x1792 to get an image URL.
+2. Use sys.download to download that URL and save it to the local path.
 
-  # write story-1.txt
-  - id: writeStory1
-    use: sys.write
-    with:
-      path: ${dir}/story-1.txt
-      contents: "{{ json.parse(steps.split.output)[0] }}"
+Save images to:
+- Story 1 image → ${dir}/b-roll-1.png
+- Story 2 image → ${dir}/b-roll-2.png
+- Story 3 image → ${dir}/b-roll-3.png
 
-  # write story-2.txt
-  - id: writeStory2
-    use: sys.write
-    with:
-      path: ${dir}/story-2.txt
-      contents: "{{ json.parse(steps.split.output)[1] }}"
+---
+name: generate-audio
+tools: sys.read, github.com/nw0rn/text2speech-gptscript
+args: dir: Directory containing story files
 
-  # write story-3.txt
-  - id: writeStory3
-    use: sys.write
-    with:
-      path: ${dir}/story-3.txt
-      contents: "{{ json.parse(steps.split.output)[2] }}"
+Read ${dir}/story-1.txt, ${dir}/story-2.txt, and ${dir}/story-3.txt using sys.read.
+Generate text-to-speech audio for each:
+- Story 1 text → output_file: ${dir}/voiceover-1
+- Story 2 text → output_file: ${dir}/voiceover-2
+- Story 3 text → output_file: ${dir}/voiceover-3
 
-  # 4. For each text part, come up with a keyword or a phrase for a 1024x1792 b-roll image, generate and save
-  - id: image1
-    use: github.com/gptscript-ai/image-generation
-    with:
-      prompt: "b-roll background image for: {{ json.parse(steps.split.output)[0] }}"
-      output_path: ${dir}/b-roll-1.png
-      size: "1024x1792"
+---
+name: transcribe-audio
+tools: github.com/dejwid/speech2text-gptscript
+args: dir: Directory containing voiceover files
 
-  - id: image2
-    use: github.com/gptscript-ai/image-generation
-    with:
-      prompt: "b-roll background image for: {{ json.parse(steps.split.output)[1] }}"
-      output_path: ${dir}/b-roll-2.png
-      size: "1024x1792"
-
-  - id: image3
-    use: github.com/gptscript-ai/image-generation
-    with:
-      prompt: "b-roll background image for: {{ json.parse(steps.split.output)[2] }}"
-      output_path: ${dir}/b-roll-3.png
-      size: "1024x1792"
-
-  # 5. For each text part, generate speech files and save them to: "${dir}/voiceover-${INDEX}"
-  - id: tts1
-    use: github.com/nw0rn/text2speech-gptscript
-    with:
-      text: "{{ json.parse(steps.split.output)[0] }}"
-      output: ${dir}/voiceover-1.mp3
-
-  - id: tts2
-    use: github.com/nw0rn/text2speech-gptscript
-    with:
-      text: "{{ json.parse(steps.split.output)[1] }}"
-      output: ${dir}/voiceover-2.mp3
-
-  - id: tts3
-    use: github.com/nw0rn/text2speech-gptscript
-    with:
-      text: "{{ json.parse(steps.split.output)[2] }}"
-      output: ${dir}/voiceover-3.mp3
-
-  # 6. Run speech2text for all 3 *.mp3 files inside ${dir}
-  - id: stt1
-    use: github.com/dejwid/speech2text-gptscript
-    with:
-      file: ${dir}/voiceover-1.mp3
-      output: ${dir}/voiceover-1.txt
-
-  - id: stt2
-    use: github.com/dejwid/speech2text-gptscript
-    with:
-      file: ${dir}/voiceover-2.mp3
-      output: ${dir}/voiceover-2.txt
-
-  - id: stt3
-    use: github.com/dejwid/speech2text-gptscript
-    with:
-      file: ${dir}/voiceover-3.mp3
-      output: ${dir}/voiceover-3.txt
+Transcribe each audio file with word-level timestamps:
+- file: ${dir}/voiceover-1.mp3 → output: ${dir}/voiceover-1.txt
+- file: ${dir}/voiceover-2.mp3 → output: ${dir}/voiceover-2.txt
+- file: ${dir}/voiceover-3.mp3 → output: ${dir}/voiceover-3.txt
