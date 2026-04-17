@@ -1,6 +1,7 @@
 # Narrify — URL to Video with AI
 
 Narrify turns any news article or web page into a short vertical video (Instagram Reels / TikTok style) using AI.
+<img width="1282" height="639" alt="image" src="https://github.com/user-attachments/assets/3264354e-5b74-4c2b-8742-c0486ace4636" />
 
 ## How it works
 
